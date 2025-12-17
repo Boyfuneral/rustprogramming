@@ -1,1 +1,1 @@
-/workspaces/rustprogramming/file_processor/target/release/file_processor: /workspaces/rustprogramming/file_processor/src/main.rs
+/workspaces/rustprogramming/file_processor/target/release/file_processor: /workspaces/rustprogramming/file_processor/src/analysis.rs /workspaces/rustprogramming/file_processor/src/main.rs /workspaces/rustprogramming/file_processor/src/progress.rs /workspaces/rustprogramming/file_processor/src/thread_pool.rs

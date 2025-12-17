@@ -1,48 +1,90 @@
+mod thread_pool;
+mod analysis;
+mod progress;
+
+use analysis::FileAnalysis;
+use progress::ProgressEvent;
+use thread_pool::ThreadPool;
+
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 
 fn main() {
-    let books_dir = "books";
-    let output_file = "output/summary.csv";
+    fs::create_dir_all("output").ok();
 
-    fs::create_dir_all("output").expect("Failed to create output folder");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let dirs = if args.is_empty() {
+        vec!["books".to_string()]
+    } else {
+        args
+    };
 
-    let mut rows: Vec<String> = Vec::new();
-    rows.push("filename,bytes,lines,words".to_string());
+    let paths: Vec<PathBuf> = dirs.iter().map(PathBuf::from).collect();
+    let files = analysis::collect_txt_files_from_dirs(&paths);
 
-    let mut processed = 0usize;
+    println!("Found {} .txt files", files.len());
 
-    let entries = fs::read_dir(books_dir).expect("Could not read 'books' folder");
+    let cancel = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<ProgressEvent>();
+    let results: Arc<Mutex<Vec<FileAnalysis>>> = Arc::new(Mutex::new(Vec::new()));
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("txt") {
-            continue;
+    let mut pool = ThreadPool::new(8);
+
+    for path in files {
+        let tx = tx.clone();
+        let cancel = cancel.clone();
+        let results = results.clone();
+
+        pool.submit(move || {
+            let name = path.display().to_string();
+
+            if cancel.load(Ordering::Relaxed) {
+                let _ = tx.send(ProgressEvent::Cancelled(name));
+                return;
+            }
+
+            let _ = tx.send(ProgressEvent::Started(name.clone()));
+            let analysis = analysis::analyze_file(&path);
+            results.lock().unwrap().push(analysis);
+            let _ = tx.send(ProgressEvent::Finished(
+                name,
+                std::time::Duration::from_millis(0),
+            ));
+        });
+    }
+
+    drop(tx);
+
+    while let Ok(event) = rx.recv() {
+        match event {
+            ProgressEvent::Started(f) => println!("START {}", f),
+            ProgressEvent::Finished(f, _) => println!("DONE {}", f),
+            ProgressEvent::Failed(f, m) => eprintln!("FAIL {} {}", f, m),
+            ProgressEvent::Cancelled(f) => eprintln!("CANCEL {}", f),
         }
-
-        let contents = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let bytes = contents.as_bytes().len();
-        let lines = contents.lines().count();
-        let words = contents.split_whitespace().count();
-
-        let filename = path.file_name().unwrap().to_string_lossy().to_string();
-        rows.push(format!("{},{},{},{}", filename, bytes, lines, words));
-        processed += 1;
     }
 
-    let mut file = fs::File::create(output_file).expect("Failed to create summary.csv");
-    for line in rows {
-        writeln!(file, "{}", line).unwrap();
+    pool.shutdown();
+
+    let analyses = results.lock().unwrap();
+    let mut out = fs::File::create("output/summary.csv").unwrap();
+    writeln!(out, "filename,lines,words,bytes").unwrap();
+
+    for a in analyses.iter() {
+        if let Some(s) = &a.stats {
+            writeln!(
+                out,
+                "{},{},{},{}",
+                a.filename, s.line_count, s.word_count, s.size_bytes
+            )
+            .unwrap();
+        }
     }
 
-    println!("Processed {} book files.", processed);
-    println!("Wrote results to {}", output_file);
-
-    if processed < 100 {
-        println!("WARNING: Need at least 100 books. Currently: {}", processed);
-    }
+    println!("DONE.");
 }
